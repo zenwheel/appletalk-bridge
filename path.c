@@ -4,60 +4,43 @@
 #include <string.h>
 #include "path.h"
 
-bool fileExists(char *path) {
+bool fileExists(const char *path) {
 	struct stat statbuf;
-	
+
 	if(path == 0) return false;
-	if(stat(path, &statbuf) != 0)
-		return false;
-	return true;
+	return stat(path, &statbuf) == 0;
 }
 
 char *getFilename(char *path) {
 	if(path == 0) return 0;
 	char *filename = strrchr(path, '/');
-	if(filename == 0)
-		return path;
-	filename++;
-	return filename;
+	return filename ? filename + 1 : path;
 }
 
-void getExePath(char *arg, char *buf, size_t bufLen) {
+void getExePath(const char *arg, char *buf, size_t bufLen) {
+	static const char *links[] = { "/proc/self/exe", "/proc/curproc/file", "/proc/self/path/a.out" };
+
 	if(buf == 0 || bufLen == 0) return;
 	buf[0] = 0;
-	
-	if(fileExists("/proc/self/exe")) {
-		int len = readlink("/proc/self/exe", buf, bufLen - 1);
-		if(len != -1) {
+
+	for(size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+		ssize_t len = readlink(links[i], buf, bufLen - 1);
+		if(len >= 0) {
 			buf[len] = 0;
 			return;
 		}
 	}
-	if(fileExists("/proc/curproc/file")) {
-		int len = readlink("/proc/curproc/file", buf, bufLen - 1);
-		if(len != -1) {
-			buf[len] = 0;
-			return;
-		}
-	}
-	if(fileExists("/proc/self/path/a.out")) {
-		int len = readlink("/proc/self/path/a.out", buf, bufLen - 1);
-		if(len != -1) {
-			buf[len] = 0;
-			return;
-		}
-	}
-	
-	strncpy(buf, arg, bufLen);
+
+	snprintf(buf, bufLen, "%s", arg ? arg : "");
 }
 
-void getDefaultPath(char *arg, char *buf, size_t bufLen) {
+void getDefaultPath(const char *arg, char *buf, size_t bufLen) {
 	if(buf == 0 || bufLen == 0) return;
 	getExePath(arg, buf, bufLen);
 	char *exe = strrchr(buf, '/');
 	if(exe) {
 		*exe = 0;
-	} else {
-		getcwd(buf, bufLen);
+	} else if(getcwd(buf, bufLen) == 0) {
+		buf[0] = 0;
 	}
 }

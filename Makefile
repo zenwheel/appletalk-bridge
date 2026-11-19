@@ -1,36 +1,38 @@
-ifeq ($(OS),Windows_NT)
-	detected_OS := Windows
+EXE  = appletalk-bridge
+SRCS = main.c client.c path.c settings.c network.c ddp.c pcap.c log.c queue.c http.c rmq_api.c urlencode.c
+OBJS = $(SRCS:.c=.o)
+DEPS = $(SRCS:.c=.d)
+
+DEBUG    ?= 0
+CC       ?= cc
+CFLAGS   ?= -O2 -g
+CFLAGS   += -std=gnu11 -Wall -Wextra -fstack-protector-strong
+CPPFLAGS += -DDEBUG=$(DEBUG) -D_FORTIFY_SOURCE=2 -MMD -MP
+
+# rabbitmq-c and json-c ship pkg-config files on every supported platform;
+# libpcap and libcurl come from the base system on macOS, so link them directly.
+PKGS      = librabbitmq json-c
+CPPFLAGS += $(shell pkg-config --cflags $(PKGS))
+LDLIBS    = $(shell pkg-config --libs $(PKGS)) -lpcap -lcurl -lpthread
+
+ifeq ($(shell uname -s),Darwin)
+	# uthash is header-only (brew install uthash); uuid_* lives in libSystem.
+	BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+	ifneq ($(BREW_PREFIX),)
+		CPPFLAGS += -I$(BREW_PREFIX)/include
+	endif
 else
-	detected_OS := $(shell uname -s)
+	LDLIBS += -luuid
 endif
-CC=gcc
-SRCS=main.c client.c path.c settings.c network.c ddp.c pcap.c log.c queue.c http.c rmq_api.c urlencode.c
-OBJS=$(subst .c,.o,$(SRCS))
-EXE=appletalk-bridge
-CFLAGS=-DDEBUG=0
-LDFLAGS=
-JSON_CFLAGS=
-LIBS=-lrabbitmq -lpcap -lpthread -luuid -lcurl -ljson-c
-ifeq ($(detected_OS),Darwin)
-	JSON_CFLAGS=$(shell pkg-config --cflags json-c)
-	LDFLAGS=$(shell pkg-config --libs-only-L json-c)
-endif
+
+.PHONY: all clean
 
 all: $(EXE)
 
-clean:
-	rm -f $(OBJS) $(EXE)
-
 $(EXE): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-settings.c: uthash
+clean:
+	rm -f $(OBJS) $(DEPS) $(EXE)
 
-uthash:
-	git clone https://github.com/troydhanson/uthash.git
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $<
-
-rmq_api.o: rmq_api.c
-	$(CC) $(CFLAGS) $(JSON_CFLAGS) -c $<
+-include $(DEPS)

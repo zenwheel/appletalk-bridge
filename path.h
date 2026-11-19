@@ -2,10 +2,11 @@
 #define __PATH_H__
 
 #include <stdbool.h>
+#include <stddef.h>
 
-bool fileExists(char *path);
+bool fileExists(const char *path);
 char *getFilename(char *path);
-void getExePath(char *arg, char *buf, size_t bufLen);
-void getDefaultPath(char *arg, char *buf, size_t bufLen);
+void getExePath(const char *arg, char *buf, size_t bufLen);
+void getDefaultPath(const char *arg, char *buf, size_t bufLen);
 
 #endif

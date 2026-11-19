@@ -1,37 +1,44 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdarg.h>
-#include <string.h>
+#include <syslog.h>
+#include "log.h"
 #include "settings.h"
 
-void logDebug(char *format, ...) {
-	if(strcmp(getSetting("InForeground"), "false") == 0) return;
+// When running in the foreground messages go to the terminal; once
+// daemonized (InForeground = false) they go to syslog instead.
+
+static void logv(int priority, FILE *out, const char *format, va_list args) {
+	if(getBoolSetting("InForeground")) {
+		vfprintf(out, format, args);
+		fputc('\n', out);
+		fflush(out);
+	} else {
+		vsyslog(priority, format, args);
+	}
+}
+
+void logDebug(const char *format, ...) {
 #if DEBUG
-	char buf[1024];
 	va_list args;
 	va_start(args, format);
-	vsnprintf(buf, sizeof(buf), format, args);
-	printf("%s\n", buf);
+	logv(LOG_DEBUG, stdout, format, args);
 	va_end(args);
+#else
+	(void)format;
 #endif
 }
 
-void logMessage(char *format, ...) {
-	char buf[1024];
-	if(strcmp(getSetting("InForeground"), "false") == 0) return;
+void logMessage(const char *format, ...) {
 	va_list args;
 	va_start(args, format);
-	vsnprintf(buf, sizeof(buf), format, args);
-	printf("%s\n", buf);
+	logv(LOG_INFO, stdout, format, args);
 	va_end(args);
 }
 
-void logError(char *format, ...) {
-	char buf[1024];
-	if(strcmp(getSetting("InForeground"), "false") == 0) return;
+void logError(const char *format, ...) {
 	va_list args;
 	va_start(args, format);
-	vsnprintf(buf, sizeof(buf), format, args);
-	fprintf(stderr, "%s\n", buf);
+	logv(LOG_ERR, stderr, format, args);
 	va_end(args);
 }

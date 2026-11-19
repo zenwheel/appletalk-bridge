@@ -1,15 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include <string.h>
 #include <stdbool.h>
-#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
+#include <syslog.h>
 #include <pthread.h>
 #include <uuid/uuid.h>
+#include <curl/curl.h>
 #include "main.h"
 #include "client.h"
 #include "path.h"
@@ -19,24 +20,33 @@
 #include "log.h"
 #include "rmq_api.h"
 
-bool m_run = true;
+#define MAX_RECONNECT_DELAY 60
 
-void handleInterrupt(int signal) {
-	printf("\rCleaning up...\n");
-	m_run = false;
+volatile sig_atomic_t m_run = 1;
+
+static void handleSignal(int sig) {
+	(void)sig;
+	m_run = 0;
 }
 
-void *clientLoop(void *ctx) {
+// sleep for up to seconds, returning early on shutdown
+static void interruptibleSleep(unsigned seconds) {
+	for(unsigned i = 0; i < seconds && m_run; i++)
+		sleep(1);
+}
+
+static void *clientLoop(void *ctx) {
+	(void)ctx;
 	while(m_run) {
 		showClients();
-		if(m_run) sleep(10);
+		interruptibleSleep(10);
 	}
 	return 0;
 }
 
-void loadDefaults(int argc, char **argv) {
+static void loadDefaults(char **argv) {
 	uuid_t uuid;
-	char buf[255];
+	char buf[1024];
 
 	setSetting("Binary", getFilename(argv[0]));
 	getExePath(argv[0], buf, sizeof(buf));
@@ -57,16 +67,15 @@ void loadDefaults(int argc, char **argv) {
 	setSetting("RunInForeground", "true");
 	setSetting("InForeground", "true");
 	setSetting("UseSSL", "false");
-	setSetting("APIUseSSL", "false");
-	setSetting("SSLVerifyPeer", "false");
+	// APIUseSSL defaults to the value of UseSSL (see main)
+	setSetting("SSLVerifyPeer", "true");
 	setSetting("SSLVerifyHostname", "true");
-	setSetting("SSLCACertificateFile", 0);
-	setSetting("SSLClientCertificateFile", 0);
-	setSetting("SSLKeyFile", 0);
 	setSetting("MonitorMode", "false");
 	setSetting("AMQPExchange", "appleshare");
-	gethostname(buf, sizeof(buf));
-	setSetting("Hostname", buf);
+	if(gethostname(buf, sizeof(buf)) == 0) {
+		buf[sizeof(buf) - 1] = 0;
+		setSetting("Hostname", buf);
+	}
 	getInterface(buf, sizeof(buf));
 	if(buf[0])
 		setSetting("Interface", buf);
@@ -75,24 +84,61 @@ void loadDefaults(int argc, char **argv) {
 	setSetting("ClientID", buf);
 }
 
-void usage(char *exe) {
-	logMessage("Usage: %s [-h] [-d] [-p portnum]", exe);
-	logMessage("");
-	logMessage("-d | --background   Run in background");
-	logMessage("-r | --ssl          Use SSL");
-	logMessage("-m | --monitor      Monitor Mode (don't relay packets, just display packet queue)");
-	logMessage("-s | --server <s>   Specify server to connect to");
-	logMessage("-p | --port <#>     Specify port number to connect to");
-	logMessage("-u | --user <u>     Specify username to authenticate with");
-	logMessage("-x | --password <p> Specify password to authenticate with");
-	logMessage("-c | --config c>    Specify configuration file to load");
-	logMessage("-v | --version      Display version and exit");
-	logMessage("-h | --help         This message");
+static void usage(const char *exe) {
+	logMessage("Usage: %s [options]", exe);
+	logMessage("%s", "");
+	logMessage("-d | --background     Run in background (logs go to syslog)");
+	logMessage("-r | --ssl            Use SSL");
+	logMessage("-m | --monitor        Monitor Mode (don't relay packets, just display packet queue)");
+	logMessage("-i | --interface <i>  Specify network interface to bridge");
+	logMessage("-s | --server <s>     Specify server to connect to");
+	logMessage("-p | --port <#>       Specify port number to connect to");
+	logMessage("-u | --user <u>       Specify username to authenticate with");
+	logMessage("-x | --password <p>   Specify password to authenticate with (visible to other users; prefer the config file)");
+	logMessage("-c | --config <c>     Specify configuration file to load");
+	logMessage("-v | --version        Display version and exit");
+	logMessage("-h | --help           This message");
+}
+
+static bool validPort(const char *value, bool allowDisabled) {
+	if(value == 0)
+		return false;
+	char *end = 0;
+	errno = 0;
+	long port = strtol(value, &end, 10);
+	if(errno != 0 || end == value || *end != 0)
+		return false;
+	if(allowDisabled && port < 0)
+		return true;
+	return port >= 1 && port <= 65535;
+}
+
+static void daemonize(void) {
+	pid_t pid = fork();
+	if(pid == -1) {
+		logError("Unable to create background process: %s", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	if(pid > 0) // parent process, silently exit
+		exit(EXIT_SUCCESS);
+
+	setsid();
+	if(chdir("/") != 0) { /* not fatal */ }
+	int fd = open("/dev/null", O_RDWR);
+	if(fd >= 0) {
+		dup2(fd, STDIN_FILENO);
+		dup2(fd, STDOUT_FILENO);
+		dup2(fd, STDERR_FILENO);
+		if(fd > STDERR_FILENO)
+			close(fd);
+	}
+	openlog(APP_NAME, LOG_PID, LOG_DAEMON);
+	setSetting("InForeground", "false");
 }
 
 int main(int argc, char **argv) {
-	struct option o[] = {
-		{ "foreground", no_argument, 0, 'd' },
+	static const struct option o[] = {
+		{ "background", no_argument, 0, 'd' },
 		{ "ssl", no_argument, 0, 'r' },
 		{ "monitor", no_argument, 0, 'm' },
 		{ "help", no_argument, 0, 'h' },
@@ -106,134 +152,127 @@ int main(int argc, char **argv) {
 		{0, 0, 0, 0}
 	};
 
-	char c;
-	loadDefaults(argc, argv);
+	// command line options are applied after the configuration file so they override it
+	struct { const char *name; const char *value; } overrides[16];
+	size_t overrideCount = 0;
+	const char *configFile = 0;
+	int c;
 
-	while((c = getopt_long(argc, argv, "drhmi:s:p:u:x:c:v", o, 0)) != (char)-1 ) {
+	loadDefaults(argv);
+
+	while((c = getopt_long(argc, argv, "drhmi:s:p:u:x:c:v", o, 0)) != -1) {
+		const char *name = 0, *value = optarg;
 		switch(c) {
-			case 'd':
-				setSetting("RunInForeground", "false");
-				break;
-			case 'r':
-				setSetting("UseSSL", "true");
-				break;
-			case 'm':
-				setSetting("MonitorMode", "true");
-				break;
-			case 'i':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("Interface", optarg);
-				break;
-			case 's':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("Server", optarg);
-				break;
-			case 'p':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("Port", optarg);
-				break;
-			case 'u':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("User", optarg);
-				break;
-			case 'x':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("Password", optarg);
-				break;
-			case 'c':
-				if(!optarg) {
-					usage(argv[0]);
-					exit(-1);
-				}
-				setSetting("ConfigurationFile", optarg);
-				break;
+			case 'd': name = "RunInForeground"; value = "false"; break;
+			case 'r': name = "UseSSL"; value = "true"; break;
+			case 'm': name = "MonitorMode"; value = "true"; break;
+			case 'i': name = "Interface"; break;
+			case 's': name = "Server"; break;
+			case 'p': name = "Port"; break;
+			case 'u': name = "User"; break;
+			case 'x': name = "Password"; break;
+			case 'c': configFile = optarg; break;
 			case 'v':
 				logMessage("%s %s", APP_NAME, VERSION);
-				exit(0);
+				exit(EXIT_SUCCESS);
 			case 'h':
 				usage(argv[0]);
-				exit(0);
+				exit(EXIT_SUCCESS);
+			default:
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+		}
+		if(name && overrideCount < sizeof(overrides) / sizeof(overrides[0])) {
+			overrides[overrideCount].name = name;
+			overrides[overrideCount].value = value;
+			overrideCount++;
 		}
 	}
 
-	if(getSetting("ConfigurationFile") != 0)
+	if(configFile) {
+		// an explicitly requested file must exist
+		if(!loadConfiguration(configFile))
+			exit(EXIT_FAILURE);
+	} else if(fileExists(getSetting("ConfigurationFile"))) {
 		loadConfiguration(getSetting("ConfigurationFile"));
+	}
+
+	for(size_t i = 0; i < overrideCount; i++)
+		setSetting(overrides[i].name, overrides[i].value);
+
+	if(getSetting("APIUseSSL") == 0)
+		setSetting("APIUseSSL", getBoolSetting("UseSSL") ? "true" : "false");
 
 	showSettings();
 
-	signal(SIGINT, handleInterrupt);
-
-	if(atoi(getSetting("Port")) == 0) {
+	if(!validPort(getSetting("Port"), false)) {
 		logError("Invalid port specified: %s", getSetting("Port"));
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
-	if(atoi(getSetting("APIPort")) == 0) {
+	if(!validPort(getSetting("APIPort"), true)) {
 		logError("Invalid API port specified: %s", getSetting("APIPort"));
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
-	if(strcmp(getSetting("MonitorMode"), "false") == 0 && geteuid() != 0) {
-		logError("Must be run as superuser to capture packets.");
-		exit(-1);
+	bool monitor = getBoolSetting("MonitorMode");
+	if(!monitor && getSetting("Interface") == 0) {
+		logError("No usable network interface found; specify one with -i or Interface =");
+		exit(EXIT_FAILURE);
 	}
+
+	if(!getBoolSetting("UseSSL") && strcmp(getSetting("Server"), "localhost") != 0 && strcmp(getSetting("Server"), "127.0.0.1") != 0)
+		logError("Warning: UseSSL is off; your password and AppleTalk traffic are sent unencrypted");
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = handleSignal;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, 0);
+	sigaction(SIGTERM, &sa, 0);
+	signal(SIGPIPE, SIG_IGN);
 
 #if !DEBUG
-	if(strcmp(getSetting("RunInForeground"), "false") == 0 && strcmp(getSetting("MonitorMode"), "false") == 0) {
-		int pid = fork();
-		if(pid == -1) {
-			logError("Unable to create background process: %s", strerror(errno));
-			exit(-1);
-		}
-		if(pid > 0) // parent process, silently exit
-			exit(0);
-		setSetting("InForeground", "false");
-		setsid();
-	}
+	if(!getBoolSetting("RunInForeground") && !monitor)
+		daemonize();
 #endif
 
+	// must happen before any threads exist
+	curl_global_init(CURL_GLOBAL_DEFAULT);
+
 	pthread_t clientThread;
+	bool clientThreadRunning = false;
 
-	if(strcmp(getSetting("MonitorMode"), "false") == 0)
-		startPacketCapture();
-	else {
-		pthread_attr_t defaultattrs;
-		pthread_attr_init(&defaultattrs);
-
-		if(pthread_create(&clientThread, &defaultattrs, clientLoop, 0) != 0) {
+	if(!monitor) {
+		if(!startPacketCapture())
+			exit(EXIT_FAILURE);
+	} else if(atoi(getSetting("APIPort")) > 0) {
+		if(pthread_create(&clientThread, 0, clientLoop, 0) == 0)
+			clientThreadRunning = true;
+		else
 			logError("Couldn't create client thread");
-			setSetting("MonitorMode", "false");
-		}
-		pthread_attr_destroy(&defaultattrs);
 	}
 
+	unsigned delay = 1;
 	while(m_run) {
-		clientConnect();
-		if(m_run) usleep(500000);
-		break;
+		if(clientConnect())
+			delay = 1;
+		if(!m_run)
+			break;
+		logError("Lost connection to %s; reconnecting in %u seconds", getSetting("Server"), delay);
+		interruptibleSleep(delay);
+		if(delay < MAX_RECONNECT_DELAY)
+			delay = delay * 2 > MAX_RECONNECT_DELAY ? MAX_RECONNECT_DELAY : delay * 2;
 	}
+	logMessage("Cleaning up...");
 
-	if(strcmp(getSetting("MonitorMode"), "false") != 0) {
-		pthread_cancel(clientThread);
+	if(clientThreadRunning)
 		pthread_join(clientThread, 0);
-	}
 
 	stopPacketCapture();
+	curl_global_cleanup();
+	logMessage("Done.");
+	deleteSettings();
 
-	return 0;
+	return EXIT_SUCCESS;
 }

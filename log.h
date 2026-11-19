@@ -3,8 +3,10 @@
 
 #include <stdarg.h>
 
-void logDebug(char *format, ...);
-void logMessage(char *format, ...);
-void logError(char *format, ...);
+#define LOG_PRINTF __attribute__((format(printf, 1, 2)))
+
+void logDebug(const char *format, ...) LOG_PRINTF;
+void logMessage(const char *format, ...) LOG_PRINTF;
+void logError(const char *format, ...) LOG_PRINTF;
 
 #endif

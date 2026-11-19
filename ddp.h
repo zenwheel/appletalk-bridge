@@ -1,6 +1,10 @@
 #ifndef __DDP_H__
 #define __DDP_H__
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #define DDPTYPE_RTMPRD  1
 #define DDPTYPE_NBP     2
 #define DDPTYPE_ATP     3
@@ -26,6 +30,10 @@
 
 #define APPLETALK_DATA_PACKET 0x809b
 #define AARP_PACKET 0x80f3
+
+#define ETHER_HEADER_LEN 14
+#define ETHER_MAX_FRAME 1514 // without FCS
+#define ETHER_MAX_PAYLOAD 1500
 
 typedef struct __attribute__((packed)) {
 	uint8_t dest_addr[6];
@@ -112,7 +120,7 @@ typedef struct __attribute__((packed)) {
 } NBP_tuple;
 
 typedef struct __attribute__((packed)) {
-	uint8_t info; // & 0xf0 >> 4 = function, & 0x0f = tuple count
+	uint8_t info; // (info >> 4) = function, (info & 0x0f) = tuple count
 	uint8_t id;
 	NBP_tuple tuples[];
 } NBP_header;
@@ -163,9 +171,13 @@ typedef struct DDPPacketInfo {
 	uint8_t aarpDestSocket;
 } DDPPacketInfo;
 
-void parseMAC(char *buf, size_t bufLen, uint8_t *addr);
+void parseMAC(char *buf, size_t bufLen, const uint8_t *addr);
 
-DDPPacketInfo *ddpParsePacket(uint8_t *packet, size_t len);
+// true if frame is a well-formed EtherTalk (DDP) or AARP frame, in either
+// 802.2 SNAP (phase 2) or Ethernet II (phase 1) encapsulation
+bool isAppleTalkFrame(const uint8_t *frame, size_t len);
+
+DDPPacketInfo *ddpParsePacket(const uint8_t *packet, size_t len);
 void freePacketInfo(DDPPacketInfo *pkt);
 
 void printPacketDetails(DDPPacketInfo *pkt);
