@@ -1,26 +1,29 @@
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include "urlencode.h"
 
-/* courtesy of http://www.geekhideout.com/urlcode.shtml */
-/* Converts an integer value to its hex character*/
-char toHex(char code) {
-	static char hex[] = "0123456789abcdef";
-	return hex[code & 15];
-}
+/* Returns a percent-encoded copy of str suitable for a URL path segment
+ * (RFC 3986 unreserved characters are left alone).
+ * IMPORTANT: be sure to free() the returned string after use */
+char *urlEncode(const char *str) {
+	static const char hex[] = "0123456789ABCDEF";
 
-/* Returns a url-encoded version of str */
-/* IMPORTANT: be sure to free() the returned string after use */
-char *urlEncode(char *str) {
-	char *pstr = str, *buf = malloc(strlen(str) * 3 + 1), *pbuf = buf;
-	while (*pstr) {
-		if (isalnum(*pstr) || *pstr == '-' || *pstr == '_' || *pstr == '.' || *pstr == '~')
-			*pbuf++ = *pstr;
-		else if (*pstr == ' ')
-			*pbuf++ = '+';
-		else
-			*pbuf++ = '%', *pbuf++ = toHex(*pstr >> 4), *pbuf++ = toHex(*pstr & 15);
-		pstr++;
+	if(str == 0)
+		str = "";
+	char *buf = malloc(strlen(str) * 3 + 1);
+	if(buf == 0)
+		return 0;
+
+	char *pbuf = buf;
+	for(const unsigned char *p = (const unsigned char *)str; *p; p++) {
+		if((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+				*p == '-' || *p == '_' || *p == '.' || *p == '~') {
+			*pbuf++ = *p;
+		} else {
+			*pbuf++ = '%';
+			*pbuf++ = hex[*p >> 4];
+			*pbuf++ = hex[*p & 15];
+		}
 	}
 	*pbuf = 0;
 	return buf;

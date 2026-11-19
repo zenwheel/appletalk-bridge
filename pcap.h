@@ -2,29 +2,18 @@
 #define __PCAP_H__
 
 #include <stdbool.h>
-#include <sys/queue.h>
-#include "queue.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <pcap/pcap.h>
 
-struct packet {
-	uint8_t *bytes;
-	size_t len;
-	TAILQ_ENTRY(packet) entries;
-};
+pcap_t *openInterface(const char *dev, bool forCapture);
+bool startPacketCapture(void);
+void stopPacketCapture(void);
 
-struct addrlist {
-	uint8_t srcaddr[6];
-	TAILQ_ENTRY(addrlist) entries;
-};
+// learn the source MAC of a frame we are about to inject, so the capture
+// thread never relays traffic from that (remote) device back over the bridge
+void rememberRemoteSource(const uint8_t *frame, size_t len);
 
-typedef struct CaptureState {
-	QueueConnection *q;
-	TAILQ_HEAD(addrq, addrlist) addrHead;
-} CaptureState;
-
-bool startPacketCapture();
-void stopPacketCapture();
-
-void printBuffer(uint8_t *buffer, size_t len);
-int countPackets();
+void printBuffer(const uint8_t *buffer, size_t len);
 
 #endif
